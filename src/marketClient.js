@@ -202,7 +202,7 @@ export class CoinSwitchFuturesClient {
     const [ticker, depth, candles] = await Promise.all([
       this.getTicker24h(normalizedSymbol),
       this.getDepth(normalizedSymbol),
-      this.getCandles(normalizedSymbol, { intervalMinutes: 15, lookbackHours: 18 }),
+      this.getCandles(normalizedSymbol, { intervalMinutes: 15, lookbackHours: 24 }),
     ]);
 
     const marketRow = snapshot.find((item) => item.symbol === normalizedSymbol);

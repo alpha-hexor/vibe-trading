@@ -1,5 +1,6 @@
 import readline from "node:readline/promises";
 import process from "node:process";
+import asciichart from "asciichart";
 import { getConfig } from "./config.js";
 import { OpenRouterAssistant } from "./assistant.js";
 import { CoinSwitchFuturesClient } from "./marketClient.js";
@@ -19,6 +20,18 @@ import {
 } from "./ui.js";
 
 const LOCAL_GREETINGS = new Set(["hi", "hello", "hey", "yo", "hola"]);
+
+const TERMINAL = {
+  reset: "\x1b[0m",
+  bold: "\x1b[1m",
+  dim: "\x1b[2m",
+  cyan: "\x1b[36m",
+  green: "\x1b[32m",
+  red: "\x1b[31m",
+  yellow: "\x1b[33m",
+  gray: "\x1b[90m",
+  white: "\x1b[37m",
+};
 
 const THINKING_PHRASES = [
   "reading the room",
@@ -74,6 +87,7 @@ function printHelp() {
     "/market [limit]       Show top liquid futures contracts",
     "/scan [limit]         Scan for long/short setups using indicators",
     "/symbol <symbol>      Show full technical report for a symbol",
+    "/graph <symbol>       Show a 24h terminal price graph",
     "/plan <amount>        Ask the assistant for a daily INR target trading plan",
     "/ask <question>       Ask OpenRouter with live market context",
     "/memory               Show remembered session context",
@@ -109,6 +123,190 @@ function printSymbolReport(report) {
     `MACD ${formatNumber(report.indicators.macd, 5)}   signal ${formatNumber(report.indicators.macdSignal, 5)}   hist ${formatNumber(report.indicators.macdHistogram, 5)}   ATR14 ${formatNumber(report.indicators.atr14, 5)}`,
     `support ${formatNumber(report.indicators.support, 4)}   resistance ${formatNumber(report.indicators.resistance, 4)}   max lev ${report.maxLeverage}x`,
   ]);
+}
+
+function tint(text, ...styles) {
+  return `${styles.join("")}${text}${TERMINAL.reset}`;
+}
+
+function priceDigits(value) {
+  if (!Number.isFinite(value)) {
+    return 2;
+  }
+  if (Math.abs(value) >= 100) {
+    return 2;
+  }
+  if (Math.abs(value) >= 1) {
+    return 4;
+  }
+  return 6;
+}
+
+function signedPct(value) {
+  if (!Number.isFinite(value)) {
+    return "n/a";
+  }
+  const prefix = value > 0 ? "+" : "";
+  return `${prefix}${formatPct(value, 2)}`;
+}
+
+function downsample(values, width) {
+  if (values.length <= width) {
+    return values;
+  }
+
+  return Array.from({ length: width }, (_, index) => {
+    const start = Math.floor((index * values.length) / width);
+    const end = Math.max(start + 1, Math.floor(((index + 1) * values.length) / width));
+    const bucket = values.slice(start, end);
+    return bucket.reduce((sum, value) => sum + value, 0) / bucket.length;
+  });
+}
+
+function terminalChartWidth() {
+  const columns = process.stdout.columns ?? 100;
+  return Math.max(48, Math.min(96, columns - 22));
+}
+
+function buildRangeBar({ low, high, current, width = 42 }) {
+  if (![low, high, current].every(Number.isFinite) || high <= low) {
+    return "";
+  }
+  const position = Math.max(
+    0,
+    Math.min(width - 1, Math.round(((current - low) / (high - low)) * (width - 1))),
+  );
+  return Array.from({ length: width }, (_, index) => {
+    if (index === position) {
+      return "●";
+    }
+    return index < position ? "━" : "─";
+  }).join("");
+}
+
+function buildSparkline(values, width = 22) {
+  const blocks = "▁▂▃▄▅▆▇█";
+  const series = downsample(
+    values.filter((value) => Number.isFinite(value)),
+    width,
+  );
+  if (series.length === 0) {
+    return "";
+  }
+  const min = Math.min(...series);
+  const max = Math.max(...series);
+  const range = max - min || 1;
+  return series
+    .map((value) => {
+      const index = Math.max(
+        0,
+        Math.min(blocks.length - 1, Math.round(((value - min) / range) * (blocks.length - 1))),
+      );
+      return blocks[index];
+    })
+    .join("");
+}
+
+function writeAt(chars, start, text) {
+  for (let index = 0; index < text.length && start + index < chars.length; index += 1) {
+    if (start + index >= 0) {
+      chars[start + index] = text[index];
+    }
+  }
+}
+
+function buildTimeAxis({ offset, width }) {
+  const axis = `${" ".repeat(offset - 1)}└${"─".repeat(Math.max(0, width - 1))}`;
+  const labels = Array.from({ length: offset + width }, () => " ");
+  const left = "24h ago";
+  const middle = "12h ago";
+  const right = "now";
+
+  writeAt(labels, offset, left);
+  writeAt(labels, offset + Math.floor(width / 2) - Math.floor(middle.length / 2), middle);
+  writeAt(labels, offset + width - right.length, right);
+
+  return [axis, labels.join("").trimEnd()];
+}
+
+function buildPriceGraph(values, report, { width = terminalChartWidth(), height = 14 } = {}) {
+  const series = downsample(
+    values.filter((value) => Number.isFinite(value)),
+    width,
+  );
+  if (series.length === 0) {
+    return null;
+  }
+
+  const bounds = [report.low24hUsd, report.high24hUsd].filter(
+    (value) => Number.isFinite(value) && value > 0,
+  );
+  const min = Math.min(...series, ...bounds);
+  const max = Math.max(...series, ...bounds);
+  const digits = priceDigits(max);
+  const labelWidth = Math.max(10, formatNumber(max, digits).length + 2);
+  const lineColor = report.priceChange24hPct >= 0 ? asciichart.green : asciichart.red;
+  const offset = labelWidth + 2;
+  const chart = asciichart.plot(series, {
+    height,
+    min,
+    max,
+    offset,
+    padding: " ".repeat(labelWidth),
+    colors: [lineColor],
+    format: (value) => formatNumber(value, digits).padStart(labelWidth),
+  });
+
+  return {
+    chart,
+    timeAxis: buildTimeAxis({ offset, width: series.length }),
+  };
+}
+
+function printPriceGraph(report) {
+  const candles = report.candles15m ?? [];
+  const closes = candles.map((candle) => candle.close);
+  const digits = priceDigits(report.markPriceUsd);
+  const isUp = report.priceChange24hPct >= 0;
+  const directionColor = isUp ? TERMINAL.green : TERMINAL.red;
+  const changeIcon = isUp ? "▲" : "▼";
+  const graph = buildPriceGraph(closes, report);
+  const rangeBar = buildRangeBar({
+    low: report.low24hUsd,
+    high: report.high24hUsd,
+    current: report.markPriceUsd,
+  });
+  const sparkline = buildSparkline(closes);
+
+  if (!graph) {
+    printError(`No candle data available for ${report.symbol}`);
+    return;
+  }
+
+  console.log("");
+  console.log(
+    `${tint(report.symbol, TERMINAL.bold, TERMINAL.white)} ${tint("24h futures chart", TERMINAL.gray)}  ${tint(sparkline, directionColor)}`,
+  );
+  console.log(
+    `${tint("price", TERMINAL.gray)} ${tint(`$${formatNumber(report.markPriceUsd, digits)}`, TERMINAL.bold, TERMINAL.white)}  ` +
+      `${tint("inr", TERMINAL.gray)} ₹${formatNumber(report.markPriceInr, 2)}  ` +
+      `${tint("24h", TERMINAL.gray)} ${tint(`${changeIcon} ${signedPct(report.priceChange24hPct)}`, directionColor)}`,
+  );
+  console.log(
+    `${tint("low", TERMINAL.gray)} $${formatNumber(report.low24hUsd, digits)}  ` +
+      `${tint(rangeBar, directionColor)}  ` +
+      `${tint("high", TERMINAL.gray)} $${formatNumber(report.high24hUsd, digits)}`,
+  );
+  console.log(
+    `${tint("candles", TERMINAL.gray)} ${candles.length} x 15m  ` +
+      `${tint("range", TERMINAL.gray)} $${formatNumber(report.high24hUsd - report.low24hUsd, digits)}`,
+  );
+  console.log(tint("─".repeat(Math.min(100, process.stdout.columns ?? 100)), TERMINAL.gray));
+  console.log(graph.chart);
+  for (const line of graph.timeAxis) {
+    console.log(tint(line, TERMINAL.gray));
+  }
+  console.log(tint("─".repeat(Math.min(100, process.stdout.columns ?? 100)), TERMINAL.gray));
 }
 
 function extractSymbolFromText(text) {
@@ -342,6 +540,21 @@ async function main() {
           () => client.buildSymbolReport(rawSymbol),
         );
         printSymbolReport(report);
+        continue;
+      }
+
+      if (input.startsWith("/graph")) {
+        const [, rawSymbol] = input.split(/\s+/, 2);
+        if (!rawSymbol) {
+          printError("Usage: /graph <symbol>");
+          continue;
+        }
+        const report = await withSpinner(
+          "building price graph",
+          rawSymbol.toUpperCase(),
+          () => client.buildSymbolReport(rawSymbol),
+        );
+        printPriceGraph(report);
         continue;
       }
 

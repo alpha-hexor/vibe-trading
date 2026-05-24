@@ -27,6 +27,7 @@ npm run start
 - `/market [limit]`
 - `/scan [limit]`
 - `/symbol <symbol>`
+- `/graph <symbol>`
 - `/plan <daily_target_inr>`
 - `/ask <question>`
 - `/clear`
