@@ -1,0 +1,11 @@
+{
+  "name": "claude-future",
+  "version": "0.1.0",
+  "description": "Claude Code-style terminal CLI for CoinSwitch futures trading research via OpenRouter",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node src/cli.js",
+    "check": "node --check src/cli.js && node --check src/assistant.js && node --check src/marketClient.js && node --check src/indicators.js && node --check src/config.js && node --check src/prompt.js && node --check src/ui.js && node --check src/memory.js"
+  }
+}
