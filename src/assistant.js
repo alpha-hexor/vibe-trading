@@ -17,6 +17,18 @@ function extractAssistantText(payload) {
   return "No assistant response returned by OpenRouter.";
 }
 
+function extractJsonObject(text) {
+  const trimmed = String(text ?? "").trim();
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  const candidate = fenced ? fenced[1].trim() : trimmed;
+  const start = candidate.indexOf("{");
+  const end = candidate.lastIndexOf("}");
+  if (start === -1 || end === -1 || end <= start) {
+    throw new Error("Assistant did not return a JSON object");
+  }
+  return JSON.parse(candidate.slice(start, end + 1));
+}
+
 export class OpenRouterAssistant {
   constructor(config) {
     this.config = config;
@@ -206,6 +218,126 @@ export class OpenRouterAssistant {
     }
     this.rememberTurn(question, fullText);
     return fullText;
+  }
+
+  async draftTradeJson({ tradeText, symbolReport = null, sessionMemory = null }) {
+    if (!this.config.openRouterApiKey) {
+      throw new Error("OPENROUTER_API_KEY is missing. Create a .env file before using /trade draft.");
+    }
+
+    const schema = {
+      symbol: "BTCUSDT",
+      side: "LONG",
+      entry: { type: "price", price: 76000 },
+      stopLoss: 74800,
+      targets: [
+        { type: "price", price: 77200, exitPercent: 50 },
+        { type: "range", from: 78200, to: 78600, exitPercent: 50 },
+      ],
+      invalidation: ["optional condition"],
+      riskNotes: ["optional risk note"],
+      confidence: "low|medium|high",
+      notes: "short human-readable summary",
+    };
+
+    const response = await this.createResponse({
+      model: this.config.openRouterModel,
+      temperature: 0.1,
+      stream: false,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You convert finalized futures trade plans into strict JSON. Return only one JSON object. Do not include markdown, comments, or prose. Do not invent missing critical prices; if a required value is missing, set it to null.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify(
+            {
+              task: "Extract a monitored futures trade from the user text.",
+              rules: [
+                "symbol must be a USDT futures symbol",
+                "side must be LONG or SHORT",
+                "entry may be market, price, or zone",
+                "targets may be price or range",
+                "exitPercent values must be numeric percentages",
+                "stopLoss is required",
+                "return JSON matching the schema exactly",
+              ],
+              schema,
+              userTradeText: tradeText,
+              liveSymbolContext: symbolReport,
+              sessionMemory,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenRouter request failed: ${response.status} ${errorText}`);
+    }
+
+    const payload = await response.json();
+    return extractJsonObject(extractAssistantText(payload));
+  }
+
+  async checkTradeHealthJson({ trade, symbolReport }) {
+    if (!this.config.openRouterApiKey) {
+      throw new Error("OPENROUTER_API_KEY is missing. Create a .env file before using monitor health checks.");
+    }
+
+    const response = await this.createResponse({
+      model: this.config.openRouterModel,
+      temperature: 0.1,
+      stream: false,
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a cautious futures trade monitor. Evaluate whether a saved trade setup is still valid using the provided live market context. Return only strict JSON, no markdown or prose.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify(
+            {
+              task: "Evaluate trade setup health. This is monitoring guidance only, not order execution.",
+              outputSchema: {
+                status: "valid|weakening|invalid",
+                severity: "info|warning|critical",
+                confidence: "low|medium|high",
+                summary: "one concise sentence",
+                reasons: ["short reason"],
+                suggestedAction: "hold|watch|reduce|exit|no_new_size",
+                notify: true,
+              },
+              rules: [
+                "valid means setup still broadly matches the original thesis",
+                "weakening means risk is rising but stop/target may not be hit yet",
+                "invalid means the setup thesis is broken or risk control should dominate",
+                "Use EMA, RSI, MACD, ATR, support, resistance, 24h change, funding, and current price when available",
+                "Set notify true for weakening or invalid, or for valid only if there is a material observation",
+              ],
+              trade,
+              liveSymbolContext: symbolReport,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenRouter request failed: ${response.status} ${errorText}`);
+    }
+
+    const payload = await response.json();
+    return extractJsonObject(extractAssistantText(payload));
   }
 
   clearHistory() {

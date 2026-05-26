@@ -2,9 +2,15 @@ import readline from "node:readline/promises";
 import process from "node:process";
 import asciichart from "asciichart";
 import { getConfig } from "./config.js";
+import { HealthLogger, HEALTH_LOG_FILE } from "./healthLogger.js";
+import { MonitorConfigStore } from "./monitorConfig.js";
 import { OpenRouterAssistant } from "./assistant.js";
 import { CoinSwitchFuturesClient } from "./marketClient.js";
 import { SessionMemory } from "./memory.js";
+import { NotificationConfigStore } from "./notificationConfig.js";
+import { Notifier } from "./notifier.js";
+import { TradeMonitor, parseMonitorInterval } from "./tradeMonitor.js";
+import { TradeStore } from "./tradeStore.js";
 import {
   appendAssistantStream,
   beginAssistantStream,
@@ -27,6 +33,7 @@ const TERMINAL = {
   dim: "\x1b[2m",
   cyan: "\x1b[36m",
   green: "\x1b[32m",
+  magenta: "\x1b[35m",
   red: "\x1b[31m",
   yellow: "\x1b[33m",
   gray: "\x1b[90m",
@@ -89,6 +96,17 @@ function printHelp() {
     "/symbol <symbol>      Show full technical report for a symbol",
     "/graph <symbol>       Show a 24h terminal price graph",
     "/plan <amount>        Ask the assistant for a daily INR target trading plan",
+    "/trade draft <plan>   Draft a monitored trade from a finalized plan",
+    "/trade confirm        Save the latest drafted trade",
+    "/trade list           Show monitored trades",
+    "/trade details <id>   Show live chart with entry, stop, and targets",
+    "/trade pause <id>     Pause a monitored trade",
+    "/trade resume <id>    Resume a monitored trade",
+    "/trade remove <id>    Remove a monitored trade",
+    "/monitor start [15s]  Start trade monitoring",
+    "/monitor health on    Enable 5m AI setup-validity checks",
+    "/monitor stop         Stop trade monitoring",
+    "/notification status  Show notification setup",
     "/ask <question>       Ask OpenRouter with live market context",
     "/memory               Show remembered session context",
     "/clear                Clear chat memory",
@@ -123,6 +141,74 @@ function printSymbolReport(report) {
     `MACD ${formatNumber(report.indicators.macd, 5)}   signal ${formatNumber(report.indicators.macdSignal, 5)}   hist ${formatNumber(report.indicators.macdHistogram, 5)}   ATR14 ${formatNumber(report.indicators.atr14, 5)}`,
     `support ${formatNumber(report.indicators.support, 4)}   resistance ${formatNumber(report.indicators.resistance, 4)}   max lev ${report.maxLeverage}x`,
   ]);
+}
+
+function formatEntry(entry) {
+  if (entry.type === "zone") {
+    return `$${formatNumber(entry.from, priceDigits(entry.from))} - $${formatNumber(entry.to, priceDigits(entry.to))}`;
+  }
+  if (entry.type === "market") {
+    return entry.price ? `market near $${formatNumber(entry.price, priceDigits(entry.price))}` : "market";
+  }
+  return `$${formatNumber(entry.price, priceDigits(entry.price))}`;
+}
+
+function formatTarget(target, index) {
+  const price =
+    target.type === "range"
+      ? `$${formatNumber(target.from, priceDigits(target.from))} - $${formatNumber(target.to, priceDigits(target.to))}`
+      : `$${formatNumber(target.price, priceDigits(target.price))}`;
+  const done = target.notifiedAt ? " hit" : "";
+  return `${index + 1}. ${price}   exit ${target.exitPercent}%${done}`;
+}
+
+function targetPrices(target) {
+  if (target.type === "range") {
+    return [target.from, target.to];
+  }
+  return [target.price];
+}
+
+function targetDisplayPrice(target) {
+  if (target.type === "range") {
+    return `${formatNumber(target.from, priceDigits(target.from))}-${formatNumber(target.to, priceDigits(target.to))}`;
+  }
+  return formatNumber(target.price, priceDigits(target.price));
+}
+
+function referenceEntryPrice(entry) {
+  if (entry.type === "zone") {
+    return (entry.from + entry.to) / 2;
+  }
+  return entry.price;
+}
+
+function pctDistance(from, to) {
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from === 0) {
+    return "n/a";
+  }
+  const value = ((to - from) / from) * 100;
+  return signedPct(value);
+}
+
+function printTrade(trade, title = trade.id ?? "draft") {
+  printPanel(title, [
+    `${trade.symbol} ${trade.side}   status ${trade.status ?? "draft"}   confidence ${trade.confidence ?? "unknown"}`,
+    `entry ${formatEntry(trade.entry)}   stop $${formatNumber(trade.stopLoss, priceDigits(trade.stopLoss))}`,
+    ...trade.targets.map(formatTarget),
+    ...(trade.notes ? [`notes ${trade.notes}`] : []),
+    ...(trade.riskNotes?.length ? [`risk ${trade.riskNotes.join("; ")}`] : []),
+  ]);
+}
+
+function printTrades(trades) {
+  if (trades.length === 0) {
+    printPanel("trades", ["No monitored trades yet. Use /trade draft <plan>."]);
+    return;
+  }
+  for (const trade of trades) {
+    printTrade(trade);
+  }
 }
 
 function tint(text, ...styles) {
@@ -229,6 +315,33 @@ function buildTimeAxis({ offset, width }) {
   return [axis, labels.join("").trimEnd()];
 }
 
+function currentPriceRowIndex({ current, min, max, height }) {
+  if (![current, min, max].every(Number.isFinite)) {
+    return null;
+  }
+  const range = Math.abs(max - min);
+  const ratio = range !== 0 ? height / range : 1;
+  const min2 = Math.round(min * ratio);
+  const max2 = Math.round(max * ratio);
+  const rows = Math.abs(max2 - min2);
+  const y = Math.round(current * ratio) - min2;
+  return Math.max(0, Math.min(rows, rows - y));
+}
+
+function annotateCurrentPrice(chart, { current, min, max, height }) {
+  const rowIndex = currentPriceRowIndex({ current, min, max, height });
+  if (rowIndex === null) {
+    return chart;
+  }
+  const lines = chart.split("\n");
+  if (!lines[rowIndex]) {
+    return chart;
+  }
+  const digits = priceDigits(current);
+  lines[rowIndex] = `${lines[rowIndex]} ${tint("●", TERMINAL.magenta)} ${tint(`$${formatNumber(current, digits)}`, TERMINAL.magenta)}`;
+  return lines.join("\n");
+}
+
 function buildPriceGraph(values, report, { width = terminalChartWidth(), height = 14 } = {}) {
   const series = downsample(
     values.filter((value) => Number.isFinite(value)),
@@ -258,8 +371,114 @@ function buildPriceGraph(values, report, { width = terminalChartWidth(), height 
   });
 
   return {
-    chart,
+    chart: annotateCurrentPrice(chart, {
+      current: report.markPriceUsd,
+      min,
+      max,
+      height,
+    }),
     timeAxis: buildTimeAxis({ offset, width: series.length }),
+  };
+}
+
+function horizontalSeries(value, width) {
+  return Array.from({ length: width }, () => value);
+}
+
+function tradeOverlayLevels(trade) {
+  const levels = [];
+  const entryPrice = referenceEntryPrice(trade.entry);
+  if (Number.isFinite(entryPrice)) {
+    levels.push({
+      label: "entry",
+      value: entryPrice,
+      color: asciichart.yellow,
+      terminalColor: TERMINAL.yellow,
+    });
+  }
+  if (trade.entry.type === "zone") {
+    levels.push({
+      label: "entry low",
+      value: trade.entry.from,
+      color: asciichart.yellow,
+      terminalColor: TERMINAL.yellow,
+    });
+    levels.push({
+      label: "entry high",
+      value: trade.entry.to,
+      color: asciichart.yellow,
+      terminalColor: TERMINAL.yellow,
+    });
+  }
+  levels.push({
+    label: "stop",
+    value: trade.stopLoss,
+    color: asciichart.red,
+    terminalColor: TERMINAL.red,
+  });
+
+  for (const [index, target] of trade.targets.entries()) {
+    const values = targetPrices(target);
+    for (const [priceIndex, value] of values.entries()) {
+      levels.push({
+        label:
+          target.type === "range"
+            ? `target ${index + 1} ${priceIndex === 0 ? "low" : "high"}`
+            : `target ${index + 1}`,
+        value,
+        color: asciichart.green,
+        terminalColor: TERMINAL.green,
+      });
+    }
+  }
+  return levels.filter((level) => Number.isFinite(level.value));
+}
+
+function buildTradeDetailsGraph(values, report, trade, { width = terminalChartWidth(), height = 16 } = {}) {
+  const priceSeries = downsample(
+    values.filter((value) => Number.isFinite(value)),
+    width,
+  );
+  if (priceSeries.length === 0) {
+    return null;
+  }
+
+  const levels = tradeOverlayLevels(trade);
+  const bounds = [
+    report.low24hUsd,
+    report.high24hUsd,
+    ...levels.map((level) => level.value),
+  ].filter((value) => Number.isFinite(value) && value > 0);
+  const min = Math.min(...priceSeries, ...bounds);
+  const max = Math.max(...priceSeries, ...bounds);
+  const digits = priceDigits(max);
+  const labelWidth = Math.max(10, formatNumber(max, digits).length + 2);
+  const offset = labelWidth + 2;
+  const lineColor = report.priceChange24hPct >= 0 ? asciichart.green : asciichart.red;
+  const series = [
+    priceSeries,
+    ...levels.map((level) => horizontalSeries(level.value, priceSeries.length)),
+  ];
+  const colors = [lineColor, ...levels.map((level) => level.color)];
+  const chart = asciichart.plot(series, {
+    height,
+    min,
+    max,
+    offset,
+    padding: " ".repeat(labelWidth),
+    colors,
+    format: (value) => formatNumber(value, digits).padStart(labelWidth),
+  });
+
+  return {
+    chart: annotateCurrentPrice(chart, {
+      current: report.markPriceUsd,
+      min,
+      max,
+      height,
+    }),
+    levels,
+    timeAxis: buildTimeAxis({ offset, width: priceSeries.length }),
   };
 }
 
@@ -288,7 +507,7 @@ function printPriceGraph(report) {
     `${tint(report.symbol, TERMINAL.bold, TERMINAL.white)} ${tint("24h futures chart", TERMINAL.gray)}  ${tint(sparkline, directionColor)}`,
   );
   console.log(
-    `${tint("price", TERMINAL.gray)} ${tint(`$${formatNumber(report.markPriceUsd, digits)}`, TERMINAL.bold, TERMINAL.white)}  ` +
+    `${tint("current", TERMINAL.magenta)} ${tint("●", TERMINAL.magenta)} ${tint(`$${formatNumber(report.markPriceUsd, digits)}`, TERMINAL.bold, TERMINAL.white)}  ` +
       `${tint("inr", TERMINAL.gray)} ₹${formatNumber(report.markPriceInr, 2)}  ` +
       `${tint("24h", TERMINAL.gray)} ${tint(`${changeIcon} ${signedPct(report.priceChange24hPct)}`, directionColor)}`,
   );
@@ -309,6 +528,67 @@ function printPriceGraph(report) {
   console.log(tint("─".repeat(Math.min(100, process.stdout.columns ?? 100)), TERMINAL.gray));
 }
 
+function printTradeDetails(report, trade) {
+  const candles = report.candles15m ?? [];
+  const closes = candles.map((candle) => candle.close);
+  const digits = priceDigits(report.markPriceUsd);
+  const isUp = report.priceChange24hPct >= 0;
+  const directionColor = isUp ? TERMINAL.green : TERMINAL.red;
+  const changeIcon = isUp ? "▲" : "▼";
+  const graph = buildTradeDetailsGraph(closes, report, trade);
+
+  if (!graph) {
+    printError(`No candle data available for ${report.symbol}`);
+    return;
+  }
+
+  const entryPrice = referenceEntryPrice(trade.entry);
+  const stopDistance = pctDistance(report.markPriceUsd, trade.stopLoss);
+  const targetLines = trade.targets.map((target, index) => {
+    const firstTarget = targetPrices(target)[0];
+    return `target ${index + 1} $${targetDisplayPrice(target)}   exit ${target.exitPercent}%   from current ${pctDistance(report.markPriceUsd, firstTarget)}${target.notifiedAt ? "   hit" : ""}`;
+  });
+
+  console.log("");
+  console.log(
+    `${tint(trade.id, TERMINAL.gray)} ${tint(trade.symbol, TERMINAL.bold, TERMINAL.white)} ${tint(trade.side, TERMINAL.bold, trade.side === "LONG" ? TERMINAL.green : TERMINAL.red)} ${tint("trade details", TERMINAL.gray)}`,
+  );
+  console.log(
+    `${tint("current", TERMINAL.magenta)} ${tint("●", TERMINAL.magenta)} ${tint(`$${formatNumber(report.markPriceUsd, digits)}`, TERMINAL.bold, TERMINAL.white)}  ` +
+      `${tint("24h", TERMINAL.gray)} ${tint(`${changeIcon} ${signedPct(report.priceChange24hPct)}`, directionColor)}  ` +
+      `${tint("status", TERMINAL.gray)} ${trade.status}`,
+  );
+  console.log(
+    `${tint("entry", TERMINAL.yellow)} ${formatEntry(trade.entry)}  ` +
+      `${tint("from current", TERMINAL.gray)} ${pctDistance(report.markPriceUsd, entryPrice)}  ` +
+      `${tint("stop", TERMINAL.red)} $${formatNumber(trade.stopLoss, priceDigits(trade.stopLoss))} (${stopDistance})`,
+  );
+  for (const line of targetLines) {
+    console.log(`${tint("exit", TERMINAL.green)} ${line}`);
+  }
+  if (trade.notes) {
+    console.log(`${tint("notes", TERMINAL.gray)} ${trade.notes}`);
+  }
+  if (trade.riskNotes?.length) {
+    console.log(`${tint("risk", TERMINAL.gray)} ${trade.riskNotes.join("; ")}`);
+  }
+
+  const legend = [
+    tint("price", directionColor),
+    tint("current ●", TERMINAL.magenta),
+    tint("entry", TERMINAL.yellow),
+    tint("stop", TERMINAL.red),
+    tint("targets", TERMINAL.green),
+  ].join(tint("  •  ", TERMINAL.gray));
+  console.log(`${tint("legend", TERMINAL.gray)} ${legend}`);
+  console.log(tint("─".repeat(Math.min(100, process.stdout.columns ?? 100)), TERMINAL.gray));
+  console.log(graph.chart);
+  for (const line of graph.timeAxis) {
+    console.log(tint(line, TERMINAL.gray));
+  }
+  console.log(tint("─".repeat(Math.min(100, process.stdout.columns ?? 100)), TERMINAL.gray));
+}
+
 function extractSymbolFromText(text) {
   const explicit = text.match(/\b([A-Za-z]{2,12}USDT)\b/);
   if (explicit) {
@@ -320,12 +600,7 @@ function extractSymbolFromText(text) {
     return null;
   }
 
-  const match = text.toUpperCase().match(/\b([A-Z]{3,12})\b/);
-  if (!match) {
-    return null;
-  }
-  const value = match[1];
-  if (
+  const ignored = new Set(
     [
       "LONG",
       "SHORT",
@@ -341,11 +616,16 @@ function extractSymbolFromText(text) {
       "FUTURES",
       "TRADE",
       "TODAY",
-    ].includes(value)
-  ) {
-    return null;
+    ],
+  );
+  const matches = text.toUpperCase().matchAll(/\b([A-Z]{3,12})\b/g);
+  for (const match of matches) {
+    const value = match[1];
+    if (!ignored.has(value)) {
+      return `${value}USDT`;
+    }
   }
-  return `${value}USDT`;
+  return null;
 }
 
 async function buildAskContext({ input, client }) {
@@ -460,6 +740,19 @@ async function main() {
   const assistant = new OpenRouterAssistant(config);
   const client = new CoinSwitchFuturesClient({ exchange: config.exchange });
   const memory = new SessionMemory();
+  const tradeStore = new TradeStore();
+  const notificationStore = new NotificationConfigStore();
+  const monitorConfigStore = new MonitorConfigStore();
+  const notifier = new Notifier(notificationStore);
+  const monitor = new TradeMonitor({
+    assistant,
+    client,
+    store: tradeStore,
+    notifier,
+    monitorConfigStore,
+    healthLogger: new HealthLogger({ enabled: config.debug }),
+  });
+  let latestTradeDraft = null;
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -481,6 +774,7 @@ async function main() {
 
     try {
       if (input === "/exit" || input === "/quit") {
+        monitor.stop();
         break;
       }
 
@@ -555,6 +849,247 @@ async function main() {
           () => client.buildSymbolReport(rawSymbol),
         );
         printPriceGraph(report);
+        continue;
+      }
+
+      if (input.startsWith("/notification")) {
+        const parts = input.split(/\s+/);
+        const action = parts[1] ?? "status";
+
+        if (action === "status") {
+          const status = notificationStore.status();
+          printPanel("notifications", [
+            `discord ${status.discord}`,
+            `telegram ${status.telegram}`,
+          ]);
+          continue;
+        }
+
+        if (action === "discord") {
+          const webhookUrl = input.slice("/notification discord".length).trim();
+          notificationStore.setDiscord(webhookUrl);
+          printSuccess("discord notifications configured");
+          continue;
+        }
+
+        if (action === "telegram") {
+          const [, , botToken, chatId] = parts;
+          notificationStore.setTelegram(botToken, chatId);
+          printSuccess("telegram notifications configured");
+          continue;
+        }
+
+        if (action === "test") {
+          await withSpinner("sending notification test", "", () => notifier.sendTest());
+          printSuccess("notification test sent");
+          continue;
+        }
+
+        if (action === "clear") {
+          notificationStore.clear();
+          printSuccess("notification settings cleared");
+          continue;
+        }
+
+        printError("Usage: /notification status|test|clear|discord <webhook_url>|telegram <bot_token> <chat_id>");
+        continue;
+      }
+
+      if (input.startsWith("/trade")) {
+        const parts = input.split(/\s+/);
+        const action = parts[1] ?? "list";
+
+        if (action === "draft") {
+          const tradeText = input.slice("/trade draft".length).trim();
+          if (!tradeText) {
+            printError("Usage: /trade draft <finalized trade plan>");
+            continue;
+          }
+
+          const symbol = extractSymbolFromText(tradeText);
+          const symbolReport = symbol
+            ? await withSpinner("gathering trade context", symbol, () =>
+                client.buildSymbolReport(symbol).catch(() => null),
+              )
+            : null;
+          const draft = await withSpinner("drafting monitored trade", "", () =>
+            assistant.draftTradeJson({
+              tradeText,
+              symbolReport,
+              sessionMemory: memory.buildSummary(),
+            }),
+          );
+
+          if (!draft.symbol && symbol) {
+            draft.symbol = symbol;
+          }
+          draft.symbol = await withSpinner("resolving symbol", draft.symbol ?? "", () =>
+            client.resolveSymbol(draft.symbol),
+          );
+          latestTradeDraft = tradeStore.validateDraft(draft);
+          printTrade(latestTradeDraft, "draft");
+          printPanel("next", ["Review the draft, then run /trade confirm to monitor it."]);
+          continue;
+        }
+
+        if (action === "confirm") {
+          if (!latestTradeDraft) {
+            printError("No draft to confirm. Use /trade draft <plan> first.");
+            continue;
+          }
+          const saved = tradeStore.addTrade(latestTradeDraft);
+          latestTradeDraft = null;
+          printSuccess("trade added", saved.id);
+          printTrade(saved);
+          continue;
+        }
+
+        if (action === "list") {
+          printTrades(tradeStore.loadTrades());
+          continue;
+        }
+
+        if (action === "show") {
+          const id = parts[2];
+          const trade = tradeStore.loadTrades().find((item) => item.id === id);
+          if (!trade) {
+            printError(`Trade not found: ${id}`);
+            continue;
+          }
+          printTrade(trade);
+          continue;
+        }
+
+        if (action === "details") {
+          const id = parts[2];
+          const trade = tradeStore.loadTrades().find((item) => item.id === id);
+          if (!trade) {
+            printError(`Trade not found: ${id}`);
+            continue;
+          }
+          const report = await withSpinner("building trade details", trade.symbol, () =>
+            client.buildSymbolReport(trade.symbol),
+          );
+          printTradeDetails(report, trade);
+          continue;
+        }
+
+        if (["pause", "resume", "close"].includes(action)) {
+          const id = parts[2];
+          if (!id) {
+            printError(`Usage: /trade ${action} <id>`);
+            continue;
+          }
+          const status = action === "resume" ? "active" : action === "pause" ? "paused" : "closed";
+          const trade = tradeStore.updateTrade(id, (item) => ({ ...item, status }));
+          printSuccess(`trade ${status}`, trade.id);
+          continue;
+        }
+
+        if (action === "remove") {
+          const id = parts[2];
+          if (!id) {
+            printError("Usage: /trade remove <id>");
+            continue;
+          }
+          tradeStore.removeTrade(id);
+          printSuccess("trade removed", id);
+          continue;
+        }
+
+        printError("Usage: /trade draft|confirm|list|show|details|pause|resume|close|remove");
+        continue;
+      }
+
+      if (input.startsWith("/monitor")) {
+        const parts = input.split(/\s+/);
+        const action = parts[1] ?? "status";
+
+        if (action === "status") {
+          const status = monitor.status();
+          printPanel("monitor", [
+            `running ${status.running}`,
+            `interval ${Math.round(status.intervalMs / 1000)}s`,
+            `health ${status.healthEnabled ? "on" : "off"} every ${Math.round(status.healthIntervalMs / 60000)}m`,
+            `last_check ${status.lastCheckAt ?? "never"}`,
+            `last_health_check ${status.lastHealthCheckAt ?? "never"}`,
+            `debug_log ${config.debug ? HEALTH_LOG_FILE : "off"}`,
+            `last_error ${status.lastError ?? "none"}`,
+          ]);
+          continue;
+        }
+
+        if (action === "health") {
+          const healthAction = parts[2] ?? "status";
+
+          if (healthAction === "status") {
+            const status = monitor.status();
+            printPanel("monitor health", [
+              `enabled ${status.healthEnabled}`,
+              `interval ${Math.round(status.healthIntervalMs / 60000)}m`,
+              `last_health_check ${status.lastHealthCheckAt ?? "never"}`,
+              `debug_log ${config.debug ? HEALTH_LOG_FILE : "off"}`,
+            ]);
+            continue;
+          }
+
+          if (healthAction === "on") {
+            monitorConfigStore.setHealthEnabled(true);
+            printSuccess("monitor health enabled", "AI validity checks every 5m");
+            continue;
+          }
+
+          if (healthAction === "off") {
+            monitorConfigStore.setHealthEnabled(false);
+            printSuccess("monitor health disabled");
+            continue;
+          }
+
+          if (healthAction === "check") {
+            if (!notifier.isConfigured()) {
+              printError("Configure notifications first with /notification discord <webhook_url> or /notification telegram <bot_token> <chat_id>");
+              continue;
+            }
+            const alerts = await withSpinner("running AI health check", "", () =>
+              monitor.runHealthChecks(),
+            );
+            printSuccess("AI health check complete", `${alerts.length} alert(s)`);
+            continue;
+          }
+
+          printError("Usage: /monitor health status|on|off|check");
+          continue;
+        }
+
+        if (action === "start") {
+          if (!notifier.isConfigured()) {
+            printError("Configure notifications first with /notification discord <webhook_url> or /notification telegram <bot_token> <chat_id>");
+            continue;
+          }
+          const intervalMs = parseMonitorInterval(parts[2]);
+          await withSpinner("starting monitor", `${Math.round(intervalMs / 1000)}s`, () =>
+            monitor.start(intervalMs),
+          );
+          await notifier.sendTradeAlert({ type: "monitor_started", symbol: "Claude Future" });
+          printSuccess("monitor started", `${Math.round(intervalMs / 1000)}s`);
+          continue;
+        }
+
+        if (action === "stop") {
+          monitor.stop();
+          printSuccess("monitor stopped");
+          continue;
+        }
+
+        if (action === "check") {
+          const alerts = await withSpinner("checking monitored trades", "", () =>
+            monitor.checkOnce(),
+          );
+          printSuccess("monitor check complete", `${alerts.length} alert(s)`);
+          continue;
+        }
+
+        printError("Usage: /monitor status|start [15s]|stop|check|health status|health on|health off|health check");
         continue;
       }
 

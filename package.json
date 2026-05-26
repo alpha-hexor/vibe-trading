@@ -1,12 +1,12 @@
 {
-  "name": "claude-future",
+  "name": "vibe-trading",
   "version": "0.1.0",
   "description": "Claude Code-style terminal CLI for CoinSwitch futures trading research via OpenRouter",
   "type": "module",
   "private": true,
   "scripts": {
     "start": "node src/cli.js",
-    "check": "node --check src/cli.js && node --check src/assistant.js && node --check src/marketClient.js && node --check src/indicators.js && node --check src/config.js && node --check src/prompt.js && node --check src/ui.js && node --check src/memory.js"
+    "check": "node --check src/cli.js && node --check src/assistant.js && node --check src/marketClient.js && node --check src/indicators.js && node --check src/config.js && node --check src/prompt.js && node --check src/ui.js && node --check src/memory.js && node --check src/tradeStore.js && node --check src/tradeMonitor.js && node --check src/notifier.js && node --check src/notificationConfig.js && node --check src/monitorConfig.js && node --check src/healthLogger.js"
   },
   "dependencies": {
     "asciichart": "^1.5.25"

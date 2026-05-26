@@ -35,6 +35,10 @@ function loadDotEnv() {
 
 loadDotEnv();
 
+function envFlag(name) {
+  return /^(1|true|yes|on)$/i.test(String(process.env[name] ?? "").trim());
+}
+
 export function getConfig() {
   return {
     openRouterApiKey: process.env.OPENROUTER_API_KEY ?? "",
@@ -43,5 +47,6 @@ export function getConfig() {
     openRouterSiteUrl: process.env.OPENROUTER_SITE_URL ?? "http://localhost",
     openRouterAppName: process.env.OPENROUTER_APP_NAME ?? "Claude Future",
     exchange: process.env.COINSWITCH_EXCHANGE ?? "BYBIT",
+    debug: envFlag("DEBUG"),
   };
 }
