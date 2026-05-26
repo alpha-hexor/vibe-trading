@@ -251,7 +251,3 @@ Useful feedback includes:
 - Ideas for better risk warnings or safer defaults.
 - Suggestions for new indicators, exchanges, notification channels, or monitor rules.
 - Opinions on the CLI flow, prompts, trade-draft format, or README clarity.
-
-## License
-
-No license has been specified yet. Add one before publishing if you want others to use, modify, or redistribute this project.
