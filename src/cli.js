@@ -127,21 +127,47 @@ function printMarketOverview(overview) {
 
 function printScan(scan) {
   for (const row of scan) {
+    const ind = row.indicators15m ?? row.indicators;
+    const t4h = row.indicators4h?.trendBias?.[0]?.toUpperCase() ?? "?";
+    const t1h = row.indicators1h?.trendBias?.[0]?.toUpperCase() ?? "?";
+    const t15m = ind?.trendBias?.[0]?.toUpperCase() ?? "?";
     console.log(
-      `${row.symbol.padEnd(12)} ${row.suggestedDirection.padEnd(5)} score ${String(row.opportunityScore).padStart(5)}  trend ${row.indicators.trendBias.padEnd(7)}  RSI ${formatNumber(row.indicators.rsi14, 1).padStart(5)}  MACD hist ${formatNumber(row.indicators.macdHistogram, 5)}`,
+      `${row.symbol.padEnd(12)} ${row.suggestedDirection.padEnd(5)} score ${String(row.opportunityScore).padStart(5)}  MTF ${t4h}/${t1h}/${t15m}  RSI ${formatNumber(ind?.rsi14, 1).padStart(5)}  MACD hist ${formatNumber(ind?.macdHistogram, 5)}  funding ${row.fundingSignal ?? "n/a"}`,
     );
   }
 }
 
 function printSymbolReport(report) {
+  const ind15m = report.indicators15m ?? report.indicators;
+  const ind1h = report.indicators1h;
+  const ind4h = report.indicators4h;
+  const pivots = report.dailyPivots;
+
+  const fmtBias = (b) => (b ?? "n/a").padEnd(7);
+
   printPanel(report.symbol, [
-    `${report.suggestedDirection}   score ${report.opportunityScore}   trend ${report.indicators.trendBias}`,
-    `price $${formatNumber(report.markPriceUsd, 4)} / ₹${formatNumber(report.markPriceInr, 2)}   24h ${formatPct(report.priceChange24hPct, 2)}   funding ${formatPct(report.fundingRatePct, 4)}`,
-    `EMA9 ${formatNumber(report.indicators.ema9, 4)}   EMA21 ${formatNumber(report.indicators.ema21, 4)}   EMA50 ${formatNumber(report.indicators.ema50, 4)}   RSI14 ${formatNumber(report.indicators.rsi14, 2)}`,
-    `MACD ${formatNumber(report.indicators.macd, 5)}   signal ${formatNumber(report.indicators.macdSignal, 5)}   hist ${formatNumber(report.indicators.macdHistogram, 5)}   ATR14 ${formatNumber(report.indicators.atr14, 5)}`,
-    `support ${formatNumber(report.indicators.support, 4)}   resistance ${formatNumber(report.indicators.resistance, 4)}   max lev ${report.maxLeverage}x`,
+    `${report.suggestedDirection}   score ${report.opportunityScore}/10   funding ${report.fundingSignal ?? "n/a"}`,
+    `price $${formatNumber(report.markPriceUsd, 4)} / ₹${formatNumber(report.markPriceInr, 2)}   24h ${formatPct(report.priceChange24hPct, 2)}   RS vs BTC ${report.relativeStrengthVsBtc !== null && report.relativeStrengthVsBtc !== undefined ? formatNumber(report.relativeStrengthVsBtc, 3) : "n/a"}`,
+    `funding ${formatPct(report.fundingRatePct, 4)}%   OBI ${report.orderBookImbalance !== null && report.orderBookImbalance !== undefined ? formatNumber(report.orderBookImbalance, 3) : "n/a"}   VWPM $${formatNumber(ind15m?.vwpm, 4)}`,
+    `── Multi-timeframe ──────────────────────────────────────────────────`,
+    `4h   trend ${fmtBias(ind4h?.trendBias)}  RSI ${formatNumber(ind4h?.rsi14, 1)}  StochRSI k=${formatNumber(ind4h?.stochRsi?.k, 1)} d=${formatNumber(ind4h?.stochRsi?.d, 1)}  MACD hist ${formatNumber(ind4h?.macdHistogram, 5)}`,
+    `1h   trend ${fmtBias(ind1h?.trendBias)}  RSI ${formatNumber(ind1h?.rsi14, 1)}  StochRSI k=${formatNumber(ind1h?.stochRsi?.k, 1)} d=${formatNumber(ind1h?.stochRsi?.d, 1)}  MACD hist ${formatNumber(ind1h?.macdHistogram, 5)}`,
+    `15m  trend ${fmtBias(ind15m?.trendBias)}  RSI ${formatNumber(ind15m?.rsi14, 1)}  StochRSI k=${formatNumber(ind15m?.stochRsi?.k, 1)} d=${formatNumber(ind15m?.stochRsi?.d, 1)}  MACD hist ${formatNumber(ind15m?.macdHistogram, 5)}`,
+    `── 15m detail ───────────────────────────────────────────────────────`,
+    `EMA9 ${formatNumber(ind15m?.ema9, 4)}  EMA21 ${formatNumber(ind15m?.ema21, 4)}  EMA50 ${formatNumber(ind15m?.ema50, 4)}  ATR14 ${formatNumber(ind15m?.atr14, 5)}`,
+    `BB upper ${formatNumber(ind15m?.bb?.upper, 4)}  mid ${formatNumber(ind15m?.bb?.mid, 4)}  lower ${formatNumber(ind15m?.bb?.lower, 4)}  %B ${formatNumber(ind15m?.bb?.percentB, 2)}`,
+    `OBV slope ${formatNumber(ind15m?.obvSlope, 4)}   15m support ${formatNumber(ind15m?.support, 4)}   15m resistance ${formatNumber(ind15m?.resistance, 4)}`,
+    `── Daily pivot points ───────────────────────────────────────────────`,
+    pivots
+      ? `PP $${formatNumber(pivots.pp, 4)}   R1 $${formatNumber(pivots.r1, 4)}   R2 $${formatNumber(pivots.r2, 4)}   R3 $${formatNumber(pivots.r3, 4)}`
+      : `pivot points: n/a`,
+    pivots
+      ? `              S1 $${formatNumber(pivots.s1, 4)}   S2 $${formatNumber(pivots.s2, 4)}   S3 $${formatNumber(pivots.s3, 4)}`
+      : ``,
+    `max lev ${report.maxLeverage}x`,
   ]);
 }
+
 
 function formatEntry(entry) {
   if (entry.type === "zone") {
@@ -316,16 +342,13 @@ function buildTimeAxis({ offset, width }) {
 }
 
 function currentPriceRowIndex({ current, min, max, height }) {
-  if (![current, min, max].every(Number.isFinite)) {
+  if (![current, min, max].every(Number.isFinite) || max === min) {
     return null;
   }
-  const range = Math.abs(max - min);
-  const ratio = range !== 0 ? height / range : 1;
-  const min2 = Math.round(min * ratio);
-  const max2 = Math.round(max * ratio);
-  const rows = Math.abs(max2 - min2);
-  const y = Math.round(current * ratio) - min2;
-  return Math.max(0, Math.min(rows, rows - y));
+  // Use the same mapping formula asciichart uses internally:
+  // y=0 at min (bottom), y=height at max (top). Row 0 = top, row height = bottom.
+  const y = (current - min) / (max - min) * height;
+  return Math.max(0, Math.min(height, height - Math.round(y)));
 }
 
 function annotateCurrentPrice(chart, { current, min, max, height }) {
@@ -349,6 +372,14 @@ function buildPriceGraph(values, report, { width = terminalChartWidth(), height 
   );
   if (series.length === 0) {
     return null;
+  }
+
+  // Pin the last element to the live mark price after downsampling.
+  // Downsampling averages buckets — without this, the final plotted point
+  // is a blended average of recent candles and sits above/below the real
+  // current price. Pinning ensures the chart line ends exactly where ● sits.
+  if (Number.isFinite(report.markPriceUsd) && series.length > 0) {
+    series[series.length - 1] = report.markPriceUsd;
   }
 
   const bounds = [report.low24hUsd, report.high24hUsd].filter(
@@ -441,6 +472,11 @@ function buildTradeDetailsGraph(values, report, trade, { width = terminalChartWi
   );
   if (priceSeries.length === 0) {
     return null;
+  }
+
+  // Pin last point to live mark price so the chart line ends at ●.
+  if (Number.isFinite(report.markPriceUsd) && priceSeries.length > 0) {
+    priceSeries[priceSeries.length - 1] = report.markPriceUsd;
   }
 
   const levels = tradeOverlayLevels(trade);
@@ -590,7 +626,8 @@ function printTradeDetails(report, trade) {
 }
 
 function extractSymbolFromText(text) {
-  const explicit = text.match(/\b([A-Za-z]{2,12}USDT)\b/);
+  // Allow digits + letters before USDT to catch symbols like 10000NEXUSDT, 1000PEPEUSDT
+  const explicit = text.match(/\b(\d*[A-Za-z][A-Za-z0-9]{1,14}USDT)\b/);
   if (explicit) {
     return explicit[1].toUpperCase();
   }
@@ -602,23 +639,17 @@ function extractSymbolFromText(text) {
 
   const ignored = new Set(
     [
-      "LONG",
-      "SHORT",
-      "RSI",
-      "MACD",
-      "EMA",
-      "ATR",
-      "HELP",
-      "EXIT",
-      "PLAN",
-      "SCAN",
-      "MARKET",
-      "FUTURES",
-      "TRADE",
-      "TODAY",
+      "LONG", "SHORT", "RSI", "MACD", "EMA", "ATR",
+      "HELP", "EXIT", "PLAN", "SCAN", "MARKET", "FUTURES", "TRADE", "TODAY",
+      // Common words that are not crypto symbols
+      "WHAT", "WHEN", "WHERE", "WHICH", "THAT", "THIS", "HAVE", "WILL",
+      "DOES", "LOOK", "LIKE", "SETUP", "CHECK", "BEST", "GOOD", "HIGH",
+      "WITH", "FROM", "INTO", "ABOUT", "SHOULD", "WOULD", "COULD",
+      "THE", "FOR", "ARE", "NOT", "NOW", "ITS", "AND", "BUT", "HOW",
     ],
   );
-  const matches = text.toUpperCase().matchAll(/\b([A-Z]{3,12})\b/g);
+  // Allow digits+letters in fallback scan too
+  const matches = text.toUpperCase().matchAll(/\b(\d*[A-Z][A-Z0-9]{2,14})\b/g);
   for (const match of matches) {
     const value = match[1];
     if (!ignored.has(value)) {
@@ -628,39 +659,81 @@ function extractSymbolFromText(text) {
   return null;
 }
 
-async function buildAskContext({ input, client }) {
-  const symbol = extractSymbolFromText(input);
-  const lower = input.toLowerCase();
 
-  const needsPlan =
-    /\b(plan|target|income|profit|invest|investment|account|capital|margin|deploy|allocate|buy|sell|long|short|trade|setup)\b/.test(
-      lower,
-    ) || /\b₹|rs\b/i.test(input);
-  const capitalMatch = input.match(
-    /(?:i have|my account(?: size| balance)? is|account(?: size| balance)?|capital(?: available)?|margin(?: available)?|budget|balance|with)\s*(?:of\s*)?(?:₹|rs\.?\s*|inr\s*)?(\d[\d,]*(?:\.\d+)?)/i,
-  );
-  const targetMatch = input.match(
-    /(?:target|income|profit|make|goal)\s*(?:of\s*)?(?:₹|rs\.?\s*|inr\s*)?(\d[\d,]*(?:\.\d+)?)/i,
-  );
-  const amount = capitalMatch
-    ? Number(capitalMatch[1].replaceAll(",", ""))
-    : targetMatch
-      ? Number(targetMatch[1].replaceAll(",", ""))
-      : null;
-  const needsMarketOverview =
-    /\bmarket|overview|snapshot|today|now|currently\b/.test(lower) || needsPlan;
-  const needsScan =
-    /\bscan|setup|opportunit|long|short|invest|investment|account|capital|margin|deploy|allocate|buy|sell|trade|today|best\b/.test(
-      lower,
-    ) || needsPlan;
+async function buildAskContext({ input, client, assistant, onStep }) {
+  let needsPlan = false;
+  let amount = null;
+  let needsMarketOverview = false;
+  let needsScan = false;
+  let symbol = null;
+  let preClassifierUsed = false;
+
+  if (assistant) {
+    if (onStep) onStep("classifying", "Resolving intent & symbol (Helper LLM)...");
+    try {
+      const intent = await assistant.classifyIntentJson(input);
+      needsPlan = !!intent.needsPlan;
+      amount = intent.targetInr ? Number(intent.targetInr) : null;
+      needsMarketOverview = !!intent.needsMarketOverview;
+      needsScan = !!intent.needsScan;
+      symbol = intent.symbol ? String(intent.symbol).toUpperCase() : null;
+      preClassifierUsed = true;
+      
+      if (onStep) {
+        let details = `Intent: ${needsScan ? "SCAN" : needsPlan ? "PLAN" : "CHAT"}`;
+        if (symbol) details += ` | Focus: ${symbol}`;
+        onStep("classified", `Query parsed successfully (${details})`, { intent });
+      }
+    } catch (err) {
+      if (onStep) onStep("classification_failed", `Helper LLM failure (falling back to heuristics): ${err.message}`);
+    }
+  }
+
+  // Fallback to local regex heuristics if Helper AI classifier is disabled, fails, or was not passed
+  if (!preClassifierUsed) {
+    symbol = extractSymbolFromText(input);
+    const lower = input.toLowerCase();
+
+    needsPlan =
+      /\b(plan|target|income|profit|invest|investment|account|capital|margin|deploy|allocate|buy|sell|long|short|trade|setup)\b/.test(
+        lower,
+      ) || /\b₹|rs\b/i.test(input);
+    const capitalMatch = input.match(
+      /(?:i have|my account(?: size| balance)? is|account(?: size| balance)?|capital(?: available)?|margin(?: available)?|budget|balance|with)\s*(?:of\s*)?(?:₹|rs\.?\s*|inr\s*)?(\d[\d,]*(?:\.\d+)?)/i,
+    );
+    const targetMatch = input.match(
+      /(?:target|income|profit|make|goal)\s*(?:of\s*)?(?:₹|rs\.?\s*|inr\s*)?(\d[\d,]*(?:\.\d+)?)/i,
+    );
+    amount = capitalMatch
+      ? Number(capitalMatch[1].replaceAll(",", ""))
+      : targetMatch
+        ? Number(targetMatch[1].replaceAll(",", ""))
+        : null;
+    needsMarketOverview =
+      /\b(market|overview|snapshot|today|now|currently|check|suggest|recommend|any|some|good|best|find|pick|coin|token|symbol|asset|futures)\b/.test(lower) || needsPlan;
+    needsScan =
+      /\b(scan|setup|opportunity|opportunities|opportunit|suggest|recommend|any|some|good|best|find|pick|long|short|invest|investment|account|capital|margin|deploy|allocate|buy|sell|trade|today|check)\b/.test(
+        lower,
+      ) || needsPlan;
+  }
+
+  if (onStep) onStep("fetching", "Fetching live market REST feeds (CoinSwitch Pro)...");
 
   const [marketOverview, scans, symbolReport] = await Promise.all([
     needsMarketOverview ? client.getMarketOverview({ limit: 8 }) : null,
-    needsScan ? client.scanMarket({ limit: 6 }) : null,
+    needsScan ? client.scanMarket({ limit: 20 }) : null,
     symbol
       ? client.buildSymbolReport(symbol).catch(() => null)
       : null,
   ]);
+
+  if (onStep) {
+    let summary = [];
+    if (marketOverview) summary.push(`${marketOverview.rows.length} overview rows`);
+    if (scans) summary.push(`${scans.length} scanned setups`);
+    if (symbolReport) summary.push(`report for ${symbolReport.symbol}`);
+    onStep("fetched", `Market data loaded successfully (${summary.join(", ") || "none"})`);
+  }
 
   const planContext =
     needsPlan && amount
@@ -668,11 +741,40 @@ async function buildAskContext({ input, client }) {
           dailyTargetInr: amount,
           accountCapitalInr: amount,
           smallAccountGuide: buildSmallAccountGuide(amount),
-          scannedSetups: scans ?? (await client.scanMarket({ limit: 8 })),
+          scannedSetups: scans ?? (await client.scanMarket({ limit: 20 })),
         }
       : null;
 
   return { marketOverview, scans, symbolReport, planContext };
+}
+
+async function buildAskContextWithProgress({ input, client, assistant }) {
+  let spinner = null;
+
+  const context = await buildAskContext({
+    input,
+    client,
+    assistant,
+    onStep: (step, message, data) => {
+      if (spinner) {
+        spinner.stop();
+      }
+
+      if (step === "classifying" || step === "fetching") {
+        spinner = startSpinner(message);
+      } else if (step === "classified" || step === "fetched") {
+        printSuccess(message);
+      } else if (step === "classification_failed") {
+        printStatus(message);
+      }
+    }
+  });
+
+  if (spinner) {
+    spinner.stop();
+  }
+
+  return context;
 }
 
 function buildSmallAccountGuide(amount) {
@@ -1101,7 +1203,7 @@ async function main() {
           continue;
         }
         const scan = await withSpinner("scanning market", "building planning context", () =>
-          client.scanMarket({ limit: 8 }),
+          client.scanMarket({ limit: 20 }),
         );
         const answer = await streamAssistantAnswer(assistant, {
           question: `Build a futures trading plan to pursue approximately INR ${amount.toFixed(0)} in daily profit from the scanned setups. Be explicit about which setups are strongest, what capital sizing would likely be needed, and where the risk becomes unreasonable.`,
@@ -1125,9 +1227,7 @@ async function main() {
           printError("Usage: /ask <question>");
           continue;
         }
-        const context = await withSpinner("gathering market context", "", () =>
-          buildAskContext({ input: question, client }),
-        );
+        const context = await buildAskContextWithProgress({ input: question, client, assistant });
         const answer = await streamAssistantAnswer(assistant, {
           question,
           ...context,
@@ -1148,9 +1248,7 @@ async function main() {
         continue;
       }
 
-      const context = await withSpinner("gathering market context", "", () =>
-        buildAskContext({ input, client }),
-      );
+      const context = await buildAskContextWithProgress({ input, client, assistant });
       const answer = await streamAssistantAnswer(assistant, {
         question: input,
         ...context,

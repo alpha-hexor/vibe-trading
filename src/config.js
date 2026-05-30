@@ -44,6 +44,8 @@ export function getConfig() {
     openRouterApiKey: process.env.OPENROUTER_API_KEY ?? "",
     openRouterModel:
       process.env.OPENROUTER_MODEL ?? "anthropic/claude-3.7-sonnet",
+    helperRouterModel:
+      process.env.HELPER_AI_MODEL ?? "google/gemini-2.5-flash",
     openRouterSiteUrl: process.env.OPENROUTER_SITE_URL ?? "http://localhost",
     openRouterAppName: process.env.OPENROUTER_APP_NAME ?? "Claude Future",
     exchange: process.env.COINSWITCH_EXCHANGE ?? "BYBIT",

@@ -340,6 +340,69 @@ export class OpenRouterAssistant {
     return extractJsonObject(extractAssistantText(payload));
   }
 
+  async classifyIntentJson(userInput) {
+    if (!this.config.openRouterApiKey) {
+      throw new Error("OPENROUTER_API_KEY is missing. Create a .env file before using the assistant.");
+    }
+
+    const response = await this.createResponse({
+      model: this.config.helperRouterModel ?? this.config.openRouterModel,
+      temperature: 0.5,
+      stream: false,
+      response_format: { type: "json_object" },
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a highly efficient, deterministic intent-routing assistant for a futures trading terminal. Classify the user query into a strict JSON object according to the requested schema. Return only one raw JSON object. Do not include any markdown formatting, triple backticks, comments, or extra prose.",
+        },
+        {
+          role: "user",
+          content: JSON.stringify(
+            {
+              task: "Classify futures trading query intent and extract potential symbols or daily target amounts in INR.",
+              rules: [
+                "needsScan: true if user is asking to scan, check setups, suggest opportunities, find best setups, or recommend trades. Otherwise false.",
+                "needsMarketOverview: true if user is asking about the overall market state, tickers, overview, or snapshot. Otherwise false.",
+                "needsPlan: true if user mentions daily income goals, account capital, budget targets, rs, inr, or planning capital. Otherwise false.",
+                "symbol: a normalized futures symbol ending in 'USDT' (e.g. BTCUSDT, ETHUSDT, 1000PEPEUSDT, MEWUSDT) if a cryptocurrency is mentioned (even by its short/casually written name, like 'pepe', 'btc', 'sol', 'mew', 'doge'). Otherwise null.",
+                "targetInr: a numeric value representing any INR/Rs target profit or capital sizing amount mentioned in the text. Otherwise null.",
+                "isCasualGreeting: true if the query is a simple hello, hi, how are you, or general casual conversational opener. Otherwise false.",
+              ],
+              schema: {
+                needsScan: false,
+                needsMarketOverview: false,
+                needsPlan: false,
+                symbol: null,
+                targetInr: null,
+                isCasualGreeting: false,
+              },
+              userInput,
+            },
+            null,
+            2,
+          ),
+        },
+      ],
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Intent pre-classifier request failed: ${response.status} ${errorText}`);
+    }
+
+    const payload = await response.json();
+    const result = extractJsonObject(extractAssistantText(payload));
+    if (result && result.needsPlan === true) {
+      result.needsScan = true;
+      result.needsMarketOverview = true;
+    }
+    else if (result && result.needsScan === true) {
+      result.needsMarketOverview = true;
+    }  
+    return result;
+  }
+
   clearHistory() {
     this.history = [];
   }
